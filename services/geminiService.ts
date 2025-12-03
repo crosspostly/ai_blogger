@@ -1,12 +1,12 @@
-
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { base64ToUint8Array, pcmToWav } from "./audioUtils";
 import type { BloggerParams, WeeklyPlan, ContentPlanItem, VideoAsset } from '../types';
+import { getApiKey } from '../config/apiConfig';
 
 type LogCallback = (message: string, type?: 'info' | 'warning' | 'error' | 'success') => void;
 
 async function getAiClient() {
-    const apiKey = process.env.API_KEY || import.meta.env?.VITE_GOOGLE_API_KEY;
+    const apiKey = getApiKey('gemini');
     if (!apiKey) {
         throw new Error("API Key is missing. Please select a key via the AI Studio button.");
     }
@@ -33,7 +33,9 @@ async function retry<T>(fn: () => Promise<T>, retries = 3, baseDelay = 3000, onL
     }
 }
 
-const NEGATIVE_PROMPT = "Do not include: user interface elements, instagram overlay, buttons, hearts, likes, comments, text overlay, app icons, split screen, collage, grid, multiple panels, blurry, low quality, distorted face, holding camera, visible camera device, phone in hand. Do not change facial features.";
+const NEGATIVE_PROMPT = "Do not include: user interface elements, instagram overlay, buttons, hearts, likes, comments, text overlay, app icons, split screen, collage, grid, multiple panels, blurry, low quality, distorted face, holding camera, visible camera device, phone in hand. Do not change facial features. Avoid plastic skin, heavy makeup, airbrushed look, doll-like face.";
+
+const SKIN_TEXTURE_PROMPT = "High fidelity skin texture, visible pores, natural skin imperfections, realistic lighting falloff, authentic look.";
 
 interface CreativeBrief {
     avatarPrompt: string;
@@ -59,6 +61,18 @@ function selectVoiceProfile(params: BloggerParams): string {
     }
 }
 
+// Helper to get consistent aesthetic string
+function getAestheticPrompt(style: string): string {
+    const s = style.toLowerCase();
+    if (s.includes('old money')) return "Old money aesthetic, film grain, vintage soft focus, elegant, neutral tones, 35mm film style, high-end fashion editorial.";
+    if (s.includes('clean girl')) return "Clean girl aesthetic, studio lighting, sharp focus, minimalist, glowy skin, sleek, modern, neutral palette.";
+    if (s.includes('y2k')) return "Y2K aesthetic, vibrant, flash photography look, digital camera style, high contrast, glossy.";
+    if (s.includes('dark academia')) return "Dark academia aesthetic, moody, library tones, rich texture, cinematic shadow, intellectual.";
+    if (s.includes('travel lifestyle')) return "High-end Luxury Travel Lifestyle aesthetic, bright, vibrant, saturated colors, golden hour lighting, magazine editorial style, sharp 4k, crystal clear, vacation vibes.";
+    if (s.includes('cottagecore')) return "Cottagecore aesthetic, soft natural light, pastel tones, dreamy, ethereal, flower field vibe.";
+    return "High quality social media aesthetic, professional lighting, sharp focus.";
+}
+
 export async function generateCreativeBrief(params: BloggerParams, onLog?: LogCallback): Promise<CreativeBrief> {
     return retry(async () => {
         if (onLog) onLog("Generating creative brief and visual identity...");
@@ -70,10 +84,14 @@ export async function generateCreativeBrief(params: BloggerParams, onLog?: LogCa
         // Ensure chest size is part of the core definition
         const bodyContext = `Physical Build: ${params.bodyType}, ${params.chestSize} chest.`;
         const vibeContext = params.personality ? `Personality Vibe: ${params.personality}.` : "";
+        
+        // Aesthetic Influence
+        const aestheticInst = `Visual Style: ${getAestheticPrompt(params.style)}`;
 
-        const systemInstruction = `You are a creative director for a top-tier social media agency. 
+        const systemInstruction = `You are a creative director for a top-tier viral social media agency. 
         Design a unique visual identity for a new AI influencer.
-        Influencer Specs: ${params.gender}, ${params.ethnicity}, Age ${params.age}, Style ${params.style}.
+        Influencer Specs: ${params.gender}, ${params.ethnicity}, Age ${params.age}.
+        ${aestheticInst}
         ${bodyContext}
         ${vibeContext}
         ${traits}
@@ -84,8 +102,8 @@ export async function generateCreativeBrief(params: BloggerParams, onLog?: LogCa
         const prompt = `Generate a creative brief:
         1. 'avatarPrompt': Detailed prompt for a photorealistic close-up face portrait (neutral expression, high end). MUST explicitly include physical build (${params.bodyType}, ${params.chestSize}) and ALL distinguishing features (${params.traits.join(", ")}) to ensure consistency.
         2. 'wardrobePrompts': An object with 3 distinct prompts for the SAME character in different outfits:
-        - 'casual': Everyday lifestyle outfit.
-        - 'active': Sporty or Professional work outfit.
+        - 'casual': Everyday lifestyle outfit. Minimal makeup.
+        - 'active': Sporty or Professional work outfit. Natural look, sweat/texture if sporty.
         - 'glam': Evening or Creative outfit.
         3. 'voiceScript': A short, catchy 1-2 sentence spoken intro (max 15 words) in ${lang}.
         `;
@@ -128,35 +146,86 @@ export async function generateCreativeBrief(params: BloggerParams, onLog?: LogCa
     }, 3, 3000, onLog);
 }
 
+// Safe image generation helper with fallback to standard model
+async function generateImageSafe(
+    prompt: string, 
+    referenceImageBase64: string | undefined, 
+    config: any, 
+    onLog?: LogCallback
+): Promise<string> {
+    const ai = await getAiClient();
+    
+    // Attempt with Pro model first
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-3-pro-image-preview',
+            contents: {
+                parts: [
+                     ...(referenceImageBase64 ? [{ inlineData: { mimeType: 'image/jpeg', data: referenceImageBase64.replace(/^data:image\/\w+;base64,/, "") } }] : []),
+                    { text: prompt },
+                ],
+            },
+            config: config,
+        });
+        const imgData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (!imgData) throw new Error("No image data returned from Pro model");
+        return `data:image/jpeg;base64,${imgData}`;
+
+    } catch (e: any) {
+        // Check for Quota/Limit errors specific to the Pro model
+        const isQuotaError = e.message?.includes('limit: 0') || e.message?.includes('quota') || e.message?.includes('RESOURCE_EXHAUSTED') || e.status === 429;
+        
+        if (isQuotaError) {
+             if (onLog) onLog("Pro model quota exceeded. Falling back to Standard model...", 'warning');
+             
+             // Fallback to Flash/Standard Image model
+             try {
+                const response = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash-image', // Fallback model
+                    contents: {
+                        parts: [
+                             ...(referenceImageBase64 ? [{ inlineData: { mimeType: 'image/jpeg', data: referenceImageBase64.replace(/^data:image\/\w+;base64,/, "") } }] : []),
+                            { text: prompt },
+                        ],
+                    },
+                    config: { ...config }, // Reuse config (aspect ratio etc)
+                });
+                const imgData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+                if (!imgData) throw new Error("No image data returned from Standard model");
+                return `data:image/jpeg;base64,${imgData}`;
+             } catch (fallbackError: any) {
+                 console.error("Fallback generation failed", fallbackError);
+                 throw e; // Throw original error if fallback also fails or to trigger higher level catch
+             }
+        }
+        throw e;
+    }
+}
+
 export async function generateWardrobe(brief: CreativeBrief, params: BloggerParams, onLog?: LogCallback): Promise<string[]> {
     return retry(async () => {
-        const ai = await getAiClient();
         const results: string[] = [];
 
-        // STRICT CONSISTENCY ENFORCEMENT - UPDATED WITH CHEST SIZE
+        // STRICT CONSISTENCY ENFORCEMENT
         const strictTraits = params.traits && params.traits.length > 0 ? `Visible features: ${params.traits.join(", ")}.` : "";
-        // Inject chest size early in consistency check
         const consistencyBase = `Character consistency check: ${params.ethnicity} ${params.gender}. Body: ${params.bodyType}, ${params.chestSize} chest. Distinctive features: ${strictTraits}`;
+        
+        const aestheticPrompt = getAestheticPrompt(params.style);
 
         // 1. Generate the ANCHOR image (Portrait)
-        if (onLog) onLog("Generating anchor portrait (Imagen 3)...");
-        const portraitPrompt = `${brief.avatarPrompt}. ${consistencyBase}. Photorealistic, 8k, highly detailed, studio lighting, looking at camera. Vertical 9:16 portrait. Single full frame image. ${NEGATIVE_PROMPT}`;
+        if (onLog) onLog("Generating anchor portrait...");
+        const portraitPrompt = `${brief.avatarPrompt}. ${consistencyBase}. Photorealistic, 8k, highly detailed, studio lighting, looking at camera. ${SKIN_TEXTURE_PROMPT}. Vertical 9:16 portrait. Single full frame image. ${aestheticPrompt} ${NEGATIVE_PROMPT}`;
         
         try {
-            const response = await ai.models.generateContent({
-                model: 'gemini-3-pro-image-preview',
-                contents: { parts: [{ text: portraitPrompt }] },
-                config: { 
-                    responseModalities: [Modality.IMAGE],
-                    imageConfig: { aspectRatio: "9:16" } 
-                },
-            });
-            const imgData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-            if (!imgData) throw new Error("Failed to generate anchor portrait.");
+            const portraitBase64 = await generateImageSafe(
+                portraitPrompt, 
+                undefined, 
+                { responseModalities: [Modality.IMAGE], imageConfig: { aspectRatio: "9:16" } },
+                onLog
+            );
             
-            const portraitBase64 = `data:image/jpeg;base64,${imgData}`;
             results.push(portraitBase64);
-            const cleanPortraitBytes = imgData;
+            const cleanPortraitBytes = portraitBase64; // already base64 string with prefix
 
             if (onLog) onLog("Anchor portrait generated. Creating lookbook...");
 
@@ -170,26 +239,16 @@ export async function generateWardrobe(brief: CreativeBrief, params: BloggerPara
             for (const look of lookPrompts) {
                 if (onLog) onLog(`Generating ${look.type} look...`);
                 // Force strict traits in every prompt
-                const consistencyPrompt = `Full body shot of the SAME person in the reference image. Wearing: ${look.text}. ${consistencyBase}. Maintain facial features, skin tone, hair color, and age EXACTLY as the reference. Photorealistic, 8k, fashion photography. Vertical 9:16 portrait. Single full frame image. ${NEGATIVE_PROMPT}`;
+                const consistencyPrompt = `Full body shot of the SAME person in the reference image. Wearing: ${look.text}. ${consistencyBase}. Maintain facial features, skin tone, hair color, and age EXACTLY as the reference. Photorealistic, 8k, fashion photography. ${SKIN_TEXTURE_PROMPT}. Vertical 9:16 portrait. Single full frame image. ${aestheticPrompt} ${NEGATIVE_PROMPT}`;
                 
                 try {
-                    const lookResponse = await ai.models.generateContent({
-                        model: 'gemini-3-pro-image-preview',
-                        contents: {
-                            parts: [
-                                { inlineData: { mimeType: 'image/jpeg', data: cleanPortraitBytes } },
-                                { text: consistencyPrompt },
-                            ],
-                        },
-                        config: { 
-                            responseModalities: [Modality.IMAGE],
-                            imageConfig: { aspectRatio: "9:16" } 
-                        },
-                    });
-                    const lookData = lookResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-                    if (lookData) {
-                        results.push(`data:image/jpeg;base64,${lookData}`);
-                    }
+                     const lookBase64 = await generateImageSafe(
+                        consistencyPrompt,
+                        cleanPortraitBytes,
+                        { responseModalities: [Modality.IMAGE], imageConfig: { aspectRatio: "9:16" } },
+                        onLog
+                     );
+                     results.push(lookBase64);
                 } catch (e) {
                     if (onLog) onLog(`Failed to generate ${look.type} look`, 'warning');
                     console.error(`Failed to generate ${look.type} look`, e);
@@ -209,31 +268,19 @@ export async function generateWardrobe(brief: CreativeBrief, params: BloggerPara
 export async function generateSingleWardrobeItem(referenceAvatar: string, description: string, params: BloggerParams, onLog?: LogCallback): Promise<string> {
     return retry(async () => {
         if (onLog) onLog(`Generating custom look: ${description}`);
-        const ai = await getAiClient();
-        const cleanBase64 = referenceAvatar.replace(/^data:image\/\w+;base64,/, "");
         
         const strictTraits = params.traits && params.traits.length > 0 ? `Visible features: ${params.traits.join(", ")}.` : "";
         const consistencyBase = `Character consistency check: ${params.ethnicity} ${params.gender}. Body: ${params.bodyType}, ${params.chestSize} chest. Distinctive features: ${strictTraits}`;
+        const aestheticPrompt = getAestheticPrompt(params.style);
 
-        const prompt = `Full body shot of this person wearing: ${description}. ${consistencyBase}. Photorealistic, 8k, fashion photography. Maintain consistency with the reference face. Vertical 9:16 portrait. Single full frame image. ${NEGATIVE_PROMPT}`;
+        const prompt = `Full body shot of this person wearing: ${description}. ${consistencyBase}. Photorealistic, 8k, fashion photography. ${SKIN_TEXTURE_PROMPT}. Maintain consistency with the reference face. Vertical 9:16 portrait. Single full frame image. ${aestheticPrompt} ${NEGATIVE_PROMPT}`;
         
-        const response = await ai.models.generateContent({
-            model: 'gemini-3-pro-image-preview',
-            contents: {
-                parts: [
-                    { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } },
-                    { text: prompt },
-                ],
-            },
-            config: { 
-                responseModalities: [Modality.IMAGE],
-                imageConfig: { aspectRatio: "9:16" }
-            },
-        });
-
-        const imgData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (!imgData) throw new Error("Failed to generate wardrobe item");
-        return `data:image/jpeg;base64,${imgData}`;
+        return await generateImageSafe(
+            prompt,
+            referenceAvatar,
+            { responseModalities: [Modality.IMAGE], imageConfig: { aspectRatio: "9:16" } },
+            onLog
+        );
     }, 3, 3000, onLog);
 }
 
@@ -293,22 +340,33 @@ export async function regenerateWeekPlan(
 
 export async function generateContentPlan(params: BloggerParams, onLog?: LogCallback): Promise<WeeklyPlan[]> {
     return retry(async () => {
-        if (onLog) onLog(`Developing ${params.planWeeks}-week content strategy...`);
+        if (onLog) onLog(`Developing ${params.planWeeks}-week content strategy (${params.marketingStrategy})...`);
         const ai = await getAiClient();
         const themeContext = params.customTheme ? `Focus specifically on: ${params.customTheme}` : "";
         const lang = params.outputLanguage || "English";
         
+        // Strategy Injection
+        let strategyInstructions = "";
+        if (params.marketingStrategy === 'POV / Relatable') {
+            strategyInstructions = "STRATEGY: VIRAL POV. Focus heavily on 'POV' (Point of View) formats. Titles MUST be Hook-driven (e.g. 'POV: You quit your 9-5', 'That friend who...'). Scenarios should be relatable, funny, or shocking.";
+        } else if (params.marketingStrategy === 'Visual Aesthetic') {
+             strategyInstructions = "STRATEGY: AESTHETIC VIBES. Focus on mood, visual beauty, atmosphere, and 'vibes'. Titles should be poetic or short mood identifiers. (e.g., 'Morning light', 'Dreamy days').";
+        } else {
+             strategyInstructions = "STRATEGY: EDUCATIONAL VALUE. Focus on tips, tricks, how-tos, and saving value. Titles should promise a benefit (e.g., '3 Tips for...', 'How to...').";
+        }
+
         const prompt = `Create a ${params.planWeeks}-week social media content calendar.
         Specs: ${params.gender}, ${params.ethnicity}, ${params.style}, Audience: ${params.audience}.
         Physical Attributes: ${params.bodyType}, ${params.chestSize}. Personality: ${params.personality}.
+        ${strategyInstructions}
         ${themeContext}
         OUTPUT LANGUAGE: ${lang}. All Titles, Captions, and Descriptions must be in ${lang}.
         For each week, provide 4 diverse pieces of content.
         IMPORTANT: 
         1. Ensure at least one item per week is a "Selfie" photo.
         2. Ensure at least one item is a "Vlog" style video where they talk to camera.
-        3. Mix in content where the influencer is socializing: attending events, parties, or with friends.
-        4. Include some "Natural/Candid" moments: no makeup, morning routine, relaxing.
+        3. Mix in diverse social content: parties, intimate dinners, serious conversations with friends, shared activities (hiking, shopping), and group candids. Ensure variety in expressions (not just smiling).
+        4. Include "Natural/Candid" moments: no makeup, morning routine, relaxing.
         `;
 
         const response = await ai.models.generateContent({
@@ -365,8 +423,9 @@ async function generateSlideshowFallback(
         
         const strictTraits = params.traits && params.traits.length > 0 ? `Visible features: ${params.traits.join(", ")}.` : "";
         const subjectDesc = `${params.gender} ${params.style}, ${params.bodyType}, ${params.chestSize}. ${strictTraits}.`;
+        const aestheticPrompt = getAestheticPrompt(params.style);
 
-        const basePrompt = `Professional photography. ${item.description}. Character: ${subjectDesc}. Photorealistic, 4k. Vertical 9:16 aspect ratio. Single full frame. ${NEGATIVE_PROMPT}`;
+        const basePrompt = `Professional photography. ${item.description}. Character: ${subjectDesc}. Photorealistic, 4k. Vertical 9:16 aspect ratio. Single full frame. ${aestheticPrompt} ${NEGATIVE_PROMPT}`;
         const prompts = [
             basePrompt + " Scene 1: Introduction shot.",
             basePrompt + " Scene 2: Action close up.",
@@ -376,6 +435,8 @@ async function generateSlideshowFallback(
         const images: string[] = [];
         for (const p of prompts) {
             try {
+                // Use safe generator here too if needed, but for now fallback logic is specific
+                // Keeping simple for fallback
                 const res = await ai.models.generateContent({
                     model: 'gemini-3-pro-image-preview',
                     contents: {
@@ -416,8 +477,11 @@ export async function generateMediaForPlanItem(
         const cleanReferenceBase64 = referenceAvatarBase64.replace(/^data:image\/\w+;base64,/, "");
 
         const lowerDesc = item.description.toLowerCase();
-        const isSocial = lowerDesc.includes('friends') || lowerDesc.includes('party') || lowerDesc.includes('group') || lowerDesc.includes('together');
-        const isNatural = lowerDesc.includes('natural') || lowerDesc.includes('no makeup') || lowerDesc.includes('casual');
+        const isSocial = lowerDesc.includes('friends') || lowerDesc.includes('party') || lowerDesc.includes('group') || lowerDesc.includes('together') || lowerDesc.includes('dinner') || lowerDesc.includes('club') || lowerDesc.includes('crowd');
+        const isNatural = lowerDesc.includes('natural') || lowerDesc.includes('no makeup') || lowerDesc.includes('casual') || lowerDesc.includes('routine') || lowerDesc.includes('waking up');
+
+        // Aesthetic Filter Application
+        const aestheticPrompt = getAestheticPrompt(params.style);
 
         let promptSuffix = "Single full frame image.";
         
@@ -427,50 +491,62 @@ export async function generateMediaForPlanItem(
         let subjectContext = `The character is a ${params.gender}, ${params.bodyType} with ${params.chestSize} chest, ${params.style}. Personality: ${params.personality}. ${strictTraits}. Maintain facial features, hair, and body type EXACTLY as reference image.`;
         
         if (isSocial) {
-            promptSuffix = "Shot includes the main character interacting with friends or a group. Main character is the focus but environment is lively.";
-            subjectContext += " The main character is hanging out with friends.";
+            // New Robust Social Prompting to ensure variety and integration
+            promptSuffix = "Authentic social moment. Main character is naturally integrated into the group/crowd (not just standing in front). Varied composition: over-the-shoulder, side profile, laughing, listening, or talking. Candid, not overly posed.";
+            subjectContext += " The main character is socializing.";
+            
+            // Add Contextual nuances
+            if (lowerDesc.includes('party') || lowerDesc.includes('club') || lowerDesc.includes('dancing')) {
+                promptSuffix += " Dynamic motion, lively atmosphere, fun expressions.";
+            } else if (lowerDesc.includes('dinner') || lowerDesc.includes('cafe') || lowerDesc.includes('eating')) {
+                promptSuffix += " Intimate setting, seated at table, conversation, shared meal, ambient lighting.";
+            } else if (lowerDesc.includes('walking') || lowerDesc.includes('shopping')) {
+                promptSuffix += " Walking with friends, action shot, interaction.";
+            }
         }
+
         if (isNatural) {
-            promptSuffix += " Authentic, candid, natural skin texture, less posed, minimal makeup.";
+            promptSuffix += " Authentic, candid, natural skin texture (visible pores/imperfections), less posed, minimal makeup, relaxed posture. " + SKIN_TEXTURE_PROMPT;
+        } else {
+             // For standard shots, still ensure texture
+             promptSuffix += " " + SKIN_TEXTURE_PROMPT;
         }
 
         if (item.type === 'Reel') {
             if (onLog) onLog(`Starting Video Workflow for: ${item.title}`);
             
+            // POV Check
+            const isPOV = item.title.toLowerCase().startsWith('pov') || params.marketingStrategy === 'POV / Relatable';
+            const povPrompt = isPOV ? "POV shot, or selfie angle, engaging directly with viewer." : "";
+
             // Step 1: Generate STATIC image
             if (onLog) onLog("Step 1/2: Generating scene-specific base photo...");
             const scenePrompt = `Professional photography for social media. ${item.description}. 
             ${subjectContext}
-            Photorealistic, 4k, cinematic lighting. Vertical 9:16 portrait. ${promptSuffix}
+            ${aestheticPrompt}
+            Photorealistic, 4k, cinematic lighting. Vertical 9:16 portrait. ${promptSuffix} ${povPrompt}
             ${NEGATIVE_PROMPT}
             NO USER INTERFACE.`;
 
-            const imageResponse = await ai.models.generateContent({
-                model: 'gemini-3-pro-image-preview',
-                contents: {
-                    parts: [
-                        { inlineData: { mimeType: 'image/jpeg', data: cleanReferenceBase64 } },
-                        { text: scenePrompt },
-                    ],
-                },
-                config: { 
-                    responseModalities: [Modality.IMAGE],
-                    imageConfig: { aspectRatio: "9:16" } 
-                },
-            });
-
-            const sceneImageData = imageResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-            if (!sceneImageData) throw new Error("Step 1 Failed: Could not generate base image for video.");
+            // Use SAFE generator with fallback
+            const sceneImageData = await generateImageSafe(
+                scenePrompt,
+                cleanReferenceBase64,
+                 { responseModalities: [Modality.IMAGE], imageConfig: { aspectRatio: "9:16" } },
+                 onLog
+            );
+            
+            const cleanSceneData = sceneImageData.replace(/^data:image\/\w+;base64,/, "");
             
             // Step 2: Animate with Veo
             if (onLog) onLog("Step 2/2: Animating scene with Veo...");
-            const videoPrompt = `Cinematic video, ${item.description}. Vertical 9:16 portrait. High quality. ${isSocial ? 'Lively atmosphere' : ''} ${NEGATIVE_PROMPT}`;
+            const videoPrompt = `Cinematic video, ${item.description}. Vertical 9:16 portrait. High quality. ${aestheticPrompt} ${isSocial ? 'Lively atmosphere, social interaction' : ''} ${isPOV ? 'First person point of view' : ''} ${NEGATIVE_PROMPT}`;
             
             try {
                 let operation = await ai.models.generateVideos({
                     model: 'veo-3.1-fast-generate-preview',
                     prompt: videoPrompt,
-                    image: { imageBytes: sceneImageData, mimeType: 'image/jpeg' },
+                    image: { imageBytes: cleanSceneData, mimeType: 'image/jpeg' },
                     config: { numberOfVideos: 1, resolution: '720p', aspectRatio: '9:16' },
                 });
 
@@ -484,7 +560,7 @@ export async function generateMediaForPlanItem(
                 const downloadLink = videoResource?.uri;
                 if (!downloadLink) throw new Error("Video generation failed");
 
-                const apiKey = process.env.API_KEY || import.meta.env?.VITE_GOOGLE_API_KEY;
+                const apiKey = getApiKey('gemini');
                 const finalUrl = `${downloadLink}${downloadLink.includes('?') ? '&' : '?'}key=${apiKey}`;
                 const videoResponse = await fetch(finalUrl);
                 const videoBlob = await videoResponse.blob();
@@ -504,28 +580,19 @@ export async function generateMediaForPlanItem(
             
             const prompt = `Professional photography for social media. ${item.description}. 
             ${subjectContext}
+            ${aestheticPrompt}
             Photorealistic, 4k, cinematic lighting. ${ratioDesc}. ${promptSuffix}
             ${NEGATIVE_PROMPT}
             NO USER INTERFACE.`;
             
-            const response = await ai.models.generateContent({
-                model: 'gemini-3-pro-image-preview',
-                contents: {
-                    parts: [
-                        { inlineData: { mimeType: 'image/jpeg', data: cleanReferenceBase64 } },
-                        { text: prompt },
-                    ],
-                },
-                config: { 
-                    responseModalities: [Modality.IMAGE],
-                    imageConfig: { aspectRatio: ratio } 
-                },
-            });
+            const imgData = await generateImageSafe(
+                prompt,
+                cleanReferenceBase64,
+                { responseModalities: [Modality.IMAGE], imageConfig: { aspectRatio: ratio } },
+                onLog
+            );
 
-            const imgData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-            if (!imgData) throw new Error("Image generation failed");
-
-            return { url: `data:image/jpeg;base64,${imgData}`, type: 'image' };
+            return { url: imgData, type: 'image' };
         }
     }, 3, 3000, onLog);
 }
@@ -548,29 +615,27 @@ export async function generateSelfieVideo(
 
         if (onLog) onLog("Step 1/2: Generating specific selfie base frame...");
         const strictTraits = params.traits && params.traits.length > 0 ? `Visible features: ${params.traits.join(", ")}.` : "";
-        const selfiePrompt = `Close up selfie photo of ${params?.gender}. ${params.bodyType}, ${params.chestSize}. ${strictTraits}. Holding camera with extended arm (POV). Looking directly at lens. Vertical 9:16 portrait. High quality vlog style. ${NEGATIVE_PROMPT}`;
         
-        const imageResponse = await ai.models.generateContent({
-            model: 'gemini-3-pro-image-preview',
-            contents: {
-                parts: [
-                    { inlineData: { mimeType: 'image/jpeg', data: cleanReferenceBase64 } },
-                    { text: selfiePrompt },
-                ],
-            },
-            config: { responseModalities: [Modality.IMAGE], imageConfig: { aspectRatio: "9:16" } },
-        });
+        const aestheticPrompt = getAestheticPrompt(params.style);
 
-        const selfieImageData = imageResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (!selfieImageData) throw new Error("Step 1 Failed: Could not generate selfie base image.");
+        const selfiePrompt = `Close up selfie photo of ${params?.gender}. ${params.bodyType}, ${params.chestSize}. ${strictTraits}. Holding camera with extended arm (POV). Looking directly at lens. ${SKIN_TEXTURE_PROMPT}. Vertical 9:16 portrait. High quality vlog style. ${aestheticPrompt} ${NEGATIVE_PROMPT}`;
+        
+        const selfieImageData = await generateImageSafe(
+            selfiePrompt,
+            cleanReferenceBase64,
+            { responseModalities: [Modality.IMAGE], imageConfig: { aspectRatio: "9:16" } },
+            onLog
+        );
+
+        const cleanSelfieData = selfieImageData.replace(/^data:image\/\w+;base64,/, "");
 
         if (onLog) onLog("Step 2/2: Animating selfie video with Veo...");
-        const videoPrompt = `Video selfie, talking to camera, arm held out, vlogging. Vertical 9:16 portrait. ${script.substring(0, 100)}...`;
+        const videoPrompt = `Video selfie, talking to camera, arm held out, vlogging. Vertical 9:16 portrait. ${aestheticPrompt} ${script.substring(0, 100)}...`;
 
         let operation = await ai.models.generateVideos({
             model: 'veo-3.1-fast-generate-preview',
             prompt: videoPrompt,
-            image: { imageBytes: selfieImageData, mimeType: 'image/jpeg' },
+            image: { imageBytes: cleanSelfieData, mimeType: 'image/jpeg' },
             config: { numberOfVideos: 1, resolution: '720p', aspectRatio: '9:16' },
         });
 
@@ -582,7 +647,7 @@ export async function generateSelfieVideo(
         const downloadLink = videoResource?.uri;
         if (!downloadLink) throw new Error("Video generation failed");
 
-        const apiKey = process.env.API_KEY || import.meta.env?.VITE_GOOGLE_API_KEY;
+        const apiKey = getApiKey('gemini');
         const finalUrl = `${downloadLink}${downloadLink.includes('?') ? '&' : '?'}key=${apiKey}`;
         const videoResponse = await fetch(finalUrl);
         const videoBlob = await videoResponse.blob();
@@ -610,7 +675,7 @@ export async function extendVideo(videoHandle: any, prompt: string, onLog?: LogC
         const videoResource = operation.response?.generatedVideos?.[0]?.video;
         const downloadLink = videoResource?.uri;
         if (!downloadLink) throw new Error("Extension failed");
-        const apiKey = process.env.API_KEY || import.meta.env?.VITE_GOOGLE_API_KEY;
+        const apiKey = getApiKey('gemini');
         const finalUrl = `${downloadLink}${downloadLink.includes('?') ? '&' : '?'}key=${apiKey}`;
         const videoResponse = await fetch(finalUrl);
         const videoBlob = await videoResponse.blob();
@@ -664,7 +729,7 @@ export async function animatePhoto(photoUrl: string, onLog?: LogCallback): Promi
         const videoResource = operation.response?.generatedVideos?.[0]?.video;
         const downloadLink = videoResource?.uri;
         if (!downloadLink) throw new Error("Animation failed");
-        const apiKey = process.env.API_KEY || import.meta.env?.VITE_GOOGLE_API_KEY;
+        const apiKey = getApiKey('gemini');
         const finalUrl = `${downloadLink}${downloadLink.includes('?') ? '&' : '?'}key=${apiKey}`;
         const videoResponse = await fetch(finalUrl);
         const videoBlob = await videoResponse.blob();
