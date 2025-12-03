@@ -1,0 +1,5 @@
+{
+  "name": "Copy of AI Blogger Hub",
+  "description": "A web service that allows a user to create a complete media pack for an AI blogger with a single click. It generates a unique face (avatar), creates photosets in different locations, generates video clips, and forms a content plan.",
+  "requestFramePermissions": []
+}
