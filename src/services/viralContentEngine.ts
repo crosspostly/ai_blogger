@@ -1,12 +1,20 @@
 // src/services/viralContentEngine.ts
 
 import { generateViralContent, GenerationParams, ViralContent } from '../generators/viralTextGenerator';
+import { generateVideoScript, scriptToGeminiPrompt, VideoScript } from '../generators/videoScriptGenerator';
 import { getApiKey } from '../../config/apiConfig';
+import type { EmotionalTrigger } from '../../config/viralConfig';
 
 /**
- * СЕРВИС ВИРАЛЬНОГО КОНТЕНТА
- * Главная точка входа для генерации вирального контента
+ * СЕРВИС ВИРАЛЬНОГО КОНТЕНТА + ВИДЕО
+ * Главная точка входа для генерации
  */
+
+export interface CompleteViralPackage {
+  text: ViralContent;      // Текст для поста
+  video: VideoScript;      // Сценарий видео
+  geminiPrompt: string;    // Готовый промпт для Gemini Video
+}
 
 export class ViralContentEngine {
   private apiKey: string;
@@ -36,7 +44,7 @@ export class ViralContentEngine {
           }]
         }],
         generationConfig: {
-          temperature: 0.9,  // Высокая креативность
+          temperature: 0.9,
           topP: 0.95,
           topK: 64,
           maxOutputTokens: 2048,
@@ -56,21 +64,45 @@ export class ViralContentEngine {
       throw new Error('Пустой ответ от Gemini API');
     }
 
-    // Извлекаем JSON из ответа (если есть markdown code block)
     const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
     return jsonMatch ? jsonMatch[1].trim() : text.trim();
   }
 
   /**
-   * ГЕНЕРИРОВАТЬ ВИРАЛЬНЫЙ КОНТЕНТ
+   * ГЕНЕРИРОВАТЬ ВИРАЛЬНЫЙ КОНТЕНТ (только текст)
    */
   async generate(params: GenerationParams): Promise<ViralContent> {
     return generateViralContent(params, this.callGemini.bind(this));
   }
 
   /**
+   * ГЕНЕРИРОВАТЬ ПОЛНЫЙ ПАКЕТ (текст + видео)
+   */
+  async generateComplete(params: GenerationParams): Promise<CompleteViralPackage> {
+    // 1. Генерируем виральный текст
+    const textContent = await this.generate(params);
+    
+    // 2. Выбираем первый триггер для видео-сценария
+    const primaryTrigger = textContent.usedTriggers[0] || 'fear_of_missing_out';
+    
+    // 3. Генерируем видео-сценарий
+    const videoScript = generateVideoScript(
+      primaryTrigger as EmotionalTrigger,
+      params.location
+    );
+    
+    // 4. Конвертируем в промпт для Gemini Video
+    const geminiPrompt = scriptToGeminiPrompt(videoScript);
+    
+    return {
+      text: textContent,
+      video: videoScript,
+      geminiPrompt
+    };
+  }
+
+  /**
    * ГЕНЕРИРОВАТЬ A/B ВАРИАНТЫ
-   * Создаёт 3 варианта с разными триггерами
    */
   async generateABVariants(params: GenerationParams): Promise<ViralContent[]> {
     const triggerSets = [
@@ -88,7 +120,6 @@ export class ViralContentEngine {
       )
     );
 
-    // Сортируем по виральности
     return variants.sort((a, b) => b.viralityScore - a.viralityScore);
   }
 
@@ -98,85 +129,85 @@ export class ViralContentEngine {
   async quick(topic: string, location?: string): Promise<ViralContent> {
     return this.generate({ topic, location });
   }
+
+  /**
+   * БЫСТРЫЙ ПОЛНЫЙ ПАКЕТ (текст + видео)
+   */
+  async quickComplete(topic: string, location?: string): Promise<CompleteViralPackage> {
+    return this.generateComplete({ topic, location });
+  }
 }
 
 /**
  * ПРИМЕРЫ ИСПОЛЬЗОВАНИЯ:
  */
 
-// 1. ПРОСТОЙ ВАРИАНТ
-export async function example_simple() {
+// 1. ТОЛЬКО ТЕКСТ
+export async function example_textOnly() {
   const engine = new ViralContentEngine();
   
-  const content = await engine.quick(
-    'Скрытые пляжи Бали',
-    'Бали, Индонезия'
-  );
+  const content = await engine.quick('Скрытые пляжи', 'Бали');
   
   console.log('Title:', content.title);
   console.log('Description:', content.description);
   console.log('Virality Score:', content.viralityScore);
-  console.log('Estimated Read Time:', content.estimatedReadTime, 's');
 }
 
-// 2. РАСШИРЕННЫЙ ВАРИАНТ
-export async function example_advanced() {
+// 2. ПОЛНЫЙ ПАКЕТ (ТЕКСТ + ВИДЕО)
+export async function example_complete() {
   const engine = new ViralContentEngine();
   
-  const content = await engine.generate({
-    topic: 'Бюджетное путешествие по Вьетнаму',
-    location: 'Вьетнам',
-    keyPoints: [
-      'Жизнь на $10/день',
-      'Лучшая еда в Азии',
-      'Нетуристические маршруты'
-    ],
-    targetTriggers: ['fear_of_missing_out', 'shock']
+  const pack = await engine.quickComplete('Скрытые пляжи', 'Бали');
+  
+  console.log('=== ТЕКСТ ДЛЯ ПОСТА ===');
+  console.log(pack.text.title);
+  console.log(pack.text.description);
+  
+  console.log('\n=== ПРОМПТ ДЛЯ GEMINI VIDEO ===');
+  console.log(pack.geminiPrompt);
+  
+  console.log('\n=== ТЕКСТЫ НА ВИДЕО ===');
+  pack.video.textOverlays.forEach(overlay => {
+    console.log(`[${overlay.startTime}-${overlay.endTime}s] ${overlay.text}`);
   });
   
-  console.log('Generated Content:', content);
+  console.log('\n=== ГОЛОСОВОЙ СКРИПТ ===');
+  console.log(pack.video.voiceScript);
 }
 
-// 3. A/B ТЕСТИРОВАНИЕ
-export async function example_ab_testing() {
+// 3. ИНТЕГРАЦИЯ В РЕАЛЬНЫЙ ПАЙПЛАЙН
+export async function example_pipeline() {
   const engine = new ViralContentEngine();
   
-  const variants = await engine.generateABVariants({
-    topic: 'Секретные места Грузии',
-    location: 'Тбилиси, Грузия',
-  });
+  // Генерируем полный пакет
+  const pack = await engine.quickComplete('Скрытые пляжи', 'Бали');
   
-  console.log('Variant A (Best):', variants[0]);
-  console.log('Variant B:', variants[1]);
-  console.log('Variant C:', variants[2]);
-}
-
-// 4. ИНТЕГРАЦИЯ В РЕАЛЬНОЕ ПРИЛОЖЕНИЕ
-export async function example_integration() {
-  try {
-    const engine = new ViralContentEngine();
-    
-    // Генерируем контент
-    const content = await engine.quick('Лучшие хостелы в Бангкоке', 'Бангкок');
-    
-    // Проверяем качество
-    if (content.viralityScore < 70) {
-      console.warn('Низкая виральность. Перегенерируем...');
-      // Повторная генерация
-    }
-    
-    // Используем в видео
-    const videoData = {
-      title: content.title,
-      description: content.description,
-      hashtags: content.hashtags.join(' '),
-      hook: content.hooks[0], // Первый хук для видео
-    };
-    
-    return videoData;
-    
-  } catch (error) {
-    console.error('Ошибка генерации:', error);
-    throw error;
+  // Проверяем качество
+  if (pack.text.viralityScore < 70) {
+    console.log('Низкий score. Перегенерируем...');
+    return example_pipeline(); // Рекурсия
   }
+  
+  // Используем в видео-пайплайне
+  return {
+    // Шаг 1: Создаём видео в Gemini
+    videoPrompt: pack.geminiPrompt,
+    
+    // Шаг 2: Добавляем текст на видео (в редакторе)
+    textOverlays: pack.video.textOverlays,
+    
+    // Шаг 3: Добавляем голос (TTS)
+    voiceScript: pack.video.voiceScript,
+    
+    // Шаг 4: Публикуем с этим текстом
+    caption: pack.text.description,
+    hashtags: pack.text.hashtags.join(' '),
+    
+    // Метрики
+    metrics: {
+      viralityScore: pack.text.viralityScore,
+      estimatedReadTime: pack.text.estimatedReadTime,
+      triggers: pack.text.usedTriggers
+    }
+  };
 }
