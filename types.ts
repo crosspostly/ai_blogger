@@ -16,6 +16,9 @@ export interface BloggerParams {
   chestSize: string; // New field for specific bust size
   personality: string;
   traits: string[]; // e.g. ["Freckles", "Blue Eyes", "Tattoos"]
+
+  // Viral Growth Strategy
+  marketingStrategy: 'Visual Aesthetic' | 'POV / Relatable' | 'Educational / Value';
 }
 
 export interface ContentPlanItem {

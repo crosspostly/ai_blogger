@@ -1,3 +1,4 @@
+
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { base64ToUint8Array, pcmToWav } from "./audioUtils";
 import type { BloggerParams, WeeklyPlan, ContentPlanItem, VideoAsset } from '../types';
@@ -8,27 +9,41 @@ type LogCallback = (message: string, type?: 'info' | 'warning' | 'error' | 'succ
 async function getAiClient() {
     const apiKey = getApiKey('gemini');
     if (!apiKey) {
-        throw new Error("API Key is missing. Please select a key via the AI Studio button.");
+        throw new Error("API Key is missing. Please select a key via the AI Studio button or configure VITE_GOOGLE_API_KEY.");
     }
     return new GoogleGenAI({ apiKey });
 }
 
-// Retry helper
-async function retry<T>(fn: () => Promise<T>, retries = 3, baseDelay = 3000, onLog?: LogCallback): Promise<T> {
+// Retry helper with smart exponential backoff and error parsing
+async function retry<T>(fn: () => Promise<T>, retries = 3, baseDelay = 4000, onLog?: LogCallback): Promise<T> {
     try {
         return await fn();
     } catch (e: any) {
-        const isStrictQuota = e.message?.includes('limit: 0') || e.message?.includes('limit of 0');
-        if (isStrictQuota) {
-            if (onLog) onLog("Billing Check Failed: API Limit is 0. Please enable billing.", 'error');
-            throw new Error("Billing required or Quota Exceeded (Limit 0). Please check your Google Cloud Billing or Select a different API Key.");
-        }
+        // Check for rate limits
         const isRateLimit = e.status === 429 || e.code === 429 || e.message?.includes('429') || e.message?.includes('quota') || e.message?.includes('RESOURCE_EXHAUSTED') || e.status === 503 || e.code === 503;
+        
+        // Check if there is a specific retry time
+        const match = e.message?.match(/retry in ([0-9.]+)s/);
+        const retryAfterMs = match && match[1] ? Math.ceil(parseFloat(match[1]) * 1000) + 2000 : 0;
+
         if (isRateLimit && retries > 0) {
-            if (onLog) onLog(`Rate limit hit (429). Retrying in ${baseDelay/1000}s...`, 'warning');
-            await new Promise(resolve => setTimeout(resolve, baseDelay));
-            return retry(fn, retries - 1, baseDelay * 2, onLog);
+            let delay = Math.max(baseDelay, retryAfterMs);
+            // If no specific time found, fallback to baseDelay
+            if (!retryAfterMs) delay = baseDelay;
+
+            if (onLog) onLog(`Rate limit hit. Retrying in ${(delay/1000).toFixed(1)}s...`, 'warning');
+            
+            await new Promise(resolve => setTimeout(resolve, delay));
+            
+            const nextBaseDelay = retryAfterMs ? baseDelay : baseDelay * 2;
+            return retry(fn, retries - 1, nextBaseDelay, onLog);
         }
+        
+        const isStrictQuota = (e.message?.includes('limit: 0') || e.message?.includes('limit of 0')) && !retryAfterMs;
+        if (isStrictQuota) {
+            throw new Error(`Quota Limit 0 (Free Tier Exhausted). ${e.message}`);
+        }
+
         throw e;
     }
 }
@@ -81,11 +96,8 @@ export async function generateCreativeBrief(params: BloggerParams, onLog?: LogCa
         const lang = params.outputLanguage || "English";
         const traits = params.traits && params.traits.length > 0 ? `Distinctive Features: ${params.traits.join(", ")}.` : "";
         
-        // Ensure chest size is part of the core definition
         const bodyContext = `Physical Build: ${params.bodyType}, ${params.chestSize} chest.`;
         const vibeContext = params.personality ? `Personality Vibe: ${params.personality}.` : "";
-        
-        // Aesthetic Influence
         const aestheticInst = `Visual Style: ${getAestheticPrompt(params.style)}`;
 
         const systemInstruction = `You are a creative director for a top-tier viral social media agency. 
@@ -143,10 +155,10 @@ export async function generateCreativeBrief(params: BloggerParams, onLog?: LogCa
                 voiceScript: "Hello world, welcome to my blog!"
             };
         }
-    }, 3, 3000, onLog);
+    }, 3, 5000, onLog);
 }
 
-// Safe image generation helper with fallback to standard model
+// Optimized safe image generation using Flash model for stability
 async function generateImageSafe(
     prompt: string, 
     referenceImageBase64: string | undefined, 
@@ -154,50 +166,23 @@ async function generateImageSafe(
     onLog?: LogCallback
 ): Promise<string> {
     const ai = await getAiClient();
-    
-    // Attempt with Pro model first
     try {
         const response = await ai.models.generateContent({
-            model: 'gemini-3-pro-image-preview',
+            model: 'gemini-2.5-flash-image',
             contents: {
                 parts: [
                      ...(referenceImageBase64 ? [{ inlineData: { mimeType: 'image/jpeg', data: referenceImageBase64.replace(/^data:image\/\w+;base64,/, "") } }] : []),
                     { text: prompt },
                 ],
             },
-            config: config,
+            config: { ...config }, 
         });
         const imgData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (!imgData) throw new Error("No image data returned from Pro model");
+        if (!imgData) throw new Error("No image data returned from Flash model");
         return `data:image/jpeg;base64,${imgData}`;
 
     } catch (e: any) {
-        // Check for Quota/Limit errors specific to the Pro model
-        const isQuotaError = e.message?.includes('limit: 0') || e.message?.includes('quota') || e.message?.includes('RESOURCE_EXHAUSTED') || e.status === 429;
-        
-        if (isQuotaError) {
-             if (onLog) onLog("Pro model quota exceeded. Falling back to Standard model...", 'warning');
-             
-             // Fallback to Flash/Standard Image model
-             try {
-                const response = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash-image', // Fallback model
-                    contents: {
-                        parts: [
-                             ...(referenceImageBase64 ? [{ inlineData: { mimeType: 'image/jpeg', data: referenceImageBase64.replace(/^data:image\/\w+;base64,/, "") } }] : []),
-                            { text: prompt },
-                        ],
-                    },
-                    config: { ...config }, // Reuse config (aspect ratio etc)
-                });
-                const imgData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-                if (!imgData) throw new Error("No image data returned from Standard model");
-                return `data:image/jpeg;base64,${imgData}`;
-             } catch (fallbackError: any) {
-                 console.error("Fallback generation failed", fallbackError);
-                 throw e; // Throw original error if fallback also fails or to trigger higher level catch
-             }
-        }
+        if (onLog) onLog(`Image generation failed: ${e.message}`, 'error');
         throw e;
     }
 }
@@ -225,7 +210,7 @@ export async function generateWardrobe(brief: CreativeBrief, params: BloggerPara
             );
             
             results.push(portraitBase64);
-            const cleanPortraitBytes = portraitBase64; // already base64 string with prefix
+            const cleanPortraitBytes = portraitBase64; 
 
             if (onLog) onLog("Anchor portrait generated. Creating lookbook...");
 
@@ -238,6 +223,9 @@ export async function generateWardrobe(brief: CreativeBrief, params: BloggerPara
 
             for (const look of lookPrompts) {
                 if (onLog) onLog(`Generating ${look.type} look...`);
+                
+                await new Promise(r => setTimeout(r, 15000)); 
+
                 // Force strict traits in every prompt
                 const consistencyPrompt = `Full body shot of the SAME person in the reference image. Wearing: ${look.text}. ${consistencyBase}. Maintain facial features, skin tone, hair color, and age EXACTLY as the reference. Photorealistic, 8k, fashion photography. ${SKIN_TEXTURE_PROMPT}. Vertical 9:16 portrait. Single full frame image. ${aestheticPrompt} ${NEGATIVE_PROMPT}`;
                 
@@ -262,7 +250,7 @@ export async function generateWardrobe(brief: CreativeBrief, params: BloggerPara
         
         if (results.length === 0) throw new Error("Failed to generate wardrobe.");
         return results;
-    }, 3, 3000, onLog);
+    }, 5, 8000, onLog); 
 }
 
 export async function generateSingleWardrobeItem(referenceAvatar: string, description: string, params: BloggerParams, onLog?: LogCallback): Promise<string> {
@@ -281,7 +269,31 @@ export async function generateSingleWardrobeItem(referenceAvatar: string, descri
             { responseModalities: [Modality.IMAGE], imageConfig: { aspectRatio: "9:16" } },
             onLog
         );
-    }, 3, 3000, onLog);
+    }, 3, 5000, onLog);
+}
+
+// SHARED GROWTH STRATEGY PROMPT LOGIC
+function getGrowthStrategySystemInstruction(lang: string) {
+    return `You are an elite Social Media Growth Hacker. Your goal is NOT to write a blog, but to trigger ALGORITHM SIGNALS (Watch time, Saves, Shares, Comments).
+
+    CORE MECHANIC (LOOP THEORY):
+    For Reels/Videos:
+    - 'title': This is the VISUAL HOOK text overlay on the video. Must be short, provocative, or incomplete. (e.g., "Stop doing this...", "The secret to...", "POV: You realized").
+    - 'caption': This is the VALUE/STORY. It must be long and engaging so the user reads it while the video loops in the background.
+
+    CONTENT PILLARS (Use these):
+    1. Unpopular Opinion (Triggers comments/debates).
+    2. Educational/Save-able (Triggers saves).
+    3. Relatable POV (Triggers shares/reposts).
+    4. Vulnerability/Failure (Triggers connection).
+
+    TONE:
+    - Charismatic, "Insider" vibe.
+    - Treat the follower like a close friend.
+    - Be specific, not generic.
+
+    NO "How was your day?" or generic questions.
+    OUTPUT LANGUAGE: ${lang}. All Titles and Captions must be in ${lang}.`;
 }
 
 export async function regenerateWeekPlan(
@@ -296,11 +308,12 @@ export async function regenerateWeekPlan(
         const ai = await getAiClient();
         const lang = params.outputLanguage || "English";
         
-        const prompt = `Rewrite the content plan for Week ${weekNumber} for a ${params.style} influencer.
-        NEW THEME for this week: "${theme}".
-        The output must contain exactly ${currentPlanItems.length} items.
-        Keep the same types (Post/Reel/Story) as the original plan.
-        OUTPUT LANGUAGE: ${lang}. All Titles and Captions must be in ${lang}.
+        const prompt = `Rewrite the content plan for Week ${weekNumber}.
+        NEW THEME: "${theme}".
+        
+        ${getGrowthStrategySystemInstruction(lang)}
+        
+        Provide exactly ${currentPlanItems.length} items. Keep same types (Post/Reel/Story).
         `;
 
         const response = await ai.models.generateContent({
@@ -315,9 +328,9 @@ export async function regenerateWeekPlan(
                         properties: {
                             day: { type: Type.INTEGER },
                             type: { type: Type.STRING },
-                            title: { type: Type.STRING },
-                            description: { type: Type.STRING },
-                            caption: { type: Type.STRING },
+                            title: { type: Type.STRING, description: "VISUAL HOOK (Text on video) or HEADLINE. Max 7 words." },
+                            description: { type: Type.STRING, description: "Visual scene description for AI generation." },
+                            caption: { type: Type.STRING, description: "Full caption. Use line breaks. End with Call to Action (Save/Share)." },
                             hashtags: { type: Type.ARRAY, items: { type: Type.STRING } }
                         }
                     }
@@ -327,7 +340,6 @@ export async function regenerateWeekPlan(
 
         const newItemsData = JSON.parse(response.text);
         
-        // Merge new data with existing IDs
         return newItemsData.map((newItem: any, index: number) => ({
             ...currentPlanItems[index], 
             title: newItem.title,
@@ -335,44 +347,45 @@ export async function regenerateWeekPlan(
             caption: newItem.caption,
             hashtags: newItem.hashtags
         }));
-    }, 3, 3000, onLog);
+    }, 3, 4000, onLog);
 }
 
 export async function generateContentPlan(params: BloggerParams, onLog?: LogCallback): Promise<WeeklyPlan[]> {
     return retry(async () => {
-        if (onLog) onLog(`Developing ${params.planWeeks}-week content strategy (${params.marketingStrategy})...`);
+        if (onLog) onLog(`Developing ${params.planWeeks}-week viral strategy (${params.marketingStrategy})...`);
         const ai = await getAiClient();
-        const themeContext = params.customTheme ? `Focus specifically on: ${params.customTheme}` : "";
+        const themeContext = params.customTheme ? `Focus theme on: ${params.customTheme}` : "";
         const lang = params.outputLanguage || "English";
         
-        // Strategy Injection
-        let strategyInstructions = "";
-        if (params.marketingStrategy === 'POV / Relatable') {
-            strategyInstructions = "STRATEGY: VIRAL POV. Focus heavily on 'POV' (Point of View) formats. Titles MUST be Hook-driven (e.g. 'POV: You quit your 9-5', 'That friend who...'). Scenarios should be relatable, funny, or shocking.";
+        let strategyContext = "";
+        
+        // CUSTOM STRATEGY OVERRIDES
+        if (params.style.toLowerCase().includes('travel')) {
+             strategyContext = "FOR TRAVEL: The goal is 'Magnetic Storytelling'. Mix 'Hidden Gems' with 'Raw Travel Reality'. Avoid being just a negative critic. Instead of just 'Don't go here', say 'Here is how to do it right'. Hooks should be about *feelings* or *secrets* (e.g., 'I almost didn't share this...', 'The most expensive mistake I made...'). The character is adventurous, smart, and a bit chaotic/fun.";
+        } else if (params.marketingStrategy === 'POV / Relatable') {
+            strategyContext = "Focus on POV scenarios, relatable failures, and 'That feeling when...' moments.";
         } else if (params.marketingStrategy === 'Visual Aesthetic') {
-             strategyInstructions = "STRATEGY: AESTHETIC VIBES. Focus on mood, visual beauty, atmosphere, and 'vibes'. Titles should be poetic or short mood identifiers. (e.g., 'Morning light', 'Dreamy days').";
+             strategyContext = "Focus on mood, atmosphere, and aspirational vibes. Hooks should be poetic or short.";
         } else {
-             strategyInstructions = "STRATEGY: EDUCATIONAL VALUE. Focus on tips, tricks, how-tos, and saving value. Titles should promise a benefit (e.g., '3 Tips for...', 'How to...').";
+             strategyContext = "Focus on 'How To', '3 Mistakes', 'Secrets revealed'. High value for saving.";
         }
 
-        const prompt = `Create a ${params.planWeeks}-week social media content calendar.
-        Specs: ${params.gender}, ${params.ethnicity}, ${params.style}, Audience: ${params.audience}.
-        Physical Attributes: ${params.bodyType}, ${params.chestSize}. Personality: ${params.personality}.
-        ${strategyInstructions}
+        const systemInstruction = getGrowthStrategySystemInstruction(lang);
+
+        const prompt = `Create a ${params.planWeeks}-week viral content calendar.
+        Influencer: ${params.gender}, ${params.style}, ${params.age}yo.
+        Strategy: ${strategyContext}
         ${themeContext}
-        OUTPUT LANGUAGE: ${lang}. All Titles, Captions, and Descriptions must be in ${lang}.
-        For each week, provide 4 diverse pieces of content.
-        IMPORTANT: 
-        1. Ensure at least one item per week is a "Selfie" photo.
-        2. Ensure at least one item is a "Vlog" style video where they talk to camera.
-        3. Mix in diverse social content: parties, intimate dinners, serious conversations with friends, shared activities (hiking, shopping), and group candids. Ensure variety in expressions (not just smiling).
-        4. Include "Natural/Candid" moments: no makeup, morning routine, relaxing.
+        
+        For each week, provide 4 items. Mix of Post, Reel, Story.
+        ensure Reels have specific "Visual Hooks" in the title field.
         `;
 
         const response = await ai.models.generateContent({
-            model: "gemini-2.5-pro",
+            model: "gemini-2.5-flash",
             contents: prompt,
             config: {
+                systemInstruction,
                 responseMimeType: "application/json",
                 responseSchema: {
                     type: Type.ARRAY,
@@ -387,9 +400,10 @@ export async function generateContentPlan(params: BloggerParams, onLog?: LogCall
                                     properties: {
                                         day: { type: Type.INTEGER },
                                         type: { type: Type.STRING, enum: ["Post", "Reel", "Story"] },
-                                        title: { type: Type.STRING },
-                                        description: { type: Type.STRING },
-                                        caption: { type: Type.STRING },
+                                        title: { type: Type.STRING, description: "VISUAL HOOK (Text on video) or HEADLINE. Max 7 words." },
+                                        description: { type: Type.STRING, description: "Visual scene prompt for AI generator." },
+                                        caption: { type: Type.STRING, description: "Full post caption with value and CTA." },
+                                        script: { type: Type.STRING, description: "Voiceover script for Reels (optional)." },
                                         hashtags: { type: Type.ARRAY, items: { type: Type.STRING } }
                                     },
                                     required: ["day", "type", "title", "description", "caption", "hashtags"]
@@ -406,10 +420,10 @@ export async function generateContentPlan(params: BloggerParams, onLog?: LogCall
             ...w,
             items: w.items.map((i: any) => ({ ...i, id: crypto.randomUUID() }))
         }));
-    }, 3, 3000, onLog);
+    }, 3, 4000, onLog);
 }
 
-// Fallback logic for slideshow (omitted specific update for brevity, functionality persists)
+// Fallback logic for slideshow 
 async function generateSlideshowFallback(
     item: ContentPlanItem, 
     referenceAvatarBase64: string, 
@@ -418,7 +432,6 @@ async function generateSlideshowFallback(
 ): Promise<{ url: string; type: 'slideshow'; slideshowImages: string[]; slideshowAudio: string }> {
     try {
         if (onLog) onLog("Falling back to Slideshow generation...", 'warning');
-        const ai = await getAiClient();
         const cleanBase64 = referenceAvatarBase64.replace(/^data:image\/\w+;base64,/, "");
         
         const strictTraits = params.traits && params.traits.length > 0 ? `Visible features: ${params.traits.join(", ")}.` : "";
@@ -435,31 +448,26 @@ async function generateSlideshowFallback(
         const images: string[] = [];
         for (const p of prompts) {
             try {
-                // Use safe generator here too if needed, but for now fallback logic is specific
-                // Keeping simple for fallback
-                const res = await ai.models.generateContent({
-                    model: 'gemini-3-pro-image-preview',
-                    contents: {
-                        parts: [
-                            { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } },
-                            { text: p },
-                        ],
-                    },
-                    config: { 
-                        responseModalities: [Modality.IMAGE],
-                        imageConfig: { aspectRatio: "9:16" }
-                    },
-                });
-                const data = res.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-                if (data) images.push(`data:image/jpeg;base64,${data}`);
-                await new Promise(r => setTimeout(r, 1000));
+                // Use safe generator here too
+                const imgData = await generateImageSafe(
+                    p, 
+                    cleanBase64,
+                    { responseModalities: [Modality.IMAGE], imageConfig: { aspectRatio: "9:16" } },
+                    onLog
+                );
+                images.push(imgData);
+                await new Promise(r => setTimeout(r, 6000)); // Increased buffer here too
             } catch (e: any) { console.error("Slide gen part failed", e); }
         }
         if (images.length === 0) throw new Error("Could not generate slideshow images.");
 
         const voiceName = selectVoiceProfile(params);
         let audioUrl = "";
-        try { audioUrl = await generateSpeech(item.caption, voiceName, onLog); } catch (e) { }
+        try { 
+            // Use the script if available, otherwise the caption
+            const textToSay = item.script || item.caption.substring(0, 150);
+            audioUrl = await generateSpeech(textToSay, voiceName, onLog); 
+        } catch (e) { }
         
         return { url: images[0], type: 'slideshow', slideshowImages: images, slideshowAudio: audioUrl };
     } catch (e) { throw e; }
@@ -476,39 +484,39 @@ export async function generateMediaForPlanItem(
         const ai = await getAiClient();
         const cleanReferenceBase64 = referenceAvatarBase64.replace(/^data:image\/\w+;base64,/, "");
 
+        // Smart Context Analysis based on the Title Hook
+        // If the hook implies an emotion, we enforce it in the visual prompt
+        const hook = item.title.toLowerCase();
+        let emotionalContext = "Confidence, engaging expression.";
+        
+        if (hook.includes("stop") || hook.includes("don't") || hook.includes("mistake") || hook.includes("fail") || hook.includes("trap") || hook.includes("scam")) {
+            emotionalContext = "Serious expression, hand gesture like 'stop' or 'warning', urgent look. Or looking disappointed at a receipt/location.";
+        } else if (hook.includes("secret") || hook.includes("hack") || hook.includes("you need") || hook.includes("hidden") || hook.includes("missed") || hook.includes("gatekeep")) {
+            emotionalContext = "Conspiratorial whisper expression, or showing something to camera, excited. Pointing at a view.";
+        } else if (hook.includes("pov") || hook.includes("when you") || hook.includes("feeling")) {
+            emotionalContext = "POV shot, selfie angle, looking directly into lens, relatable reaction face, maybe laughing or dreaming.";
+        } else if (hook.includes("?")) {
+            emotionalContext = "Confused or inquisitive expression, shrugging.";
+        }
+
         const lowerDesc = item.description.toLowerCase();
         const isSocial = lowerDesc.includes('friends') || lowerDesc.includes('party') || lowerDesc.includes('group') || lowerDesc.includes('together') || lowerDesc.includes('dinner') || lowerDesc.includes('club') || lowerDesc.includes('crowd');
         const isNatural = lowerDesc.includes('natural') || lowerDesc.includes('no makeup') || lowerDesc.includes('casual') || lowerDesc.includes('routine') || lowerDesc.includes('waking up');
 
-        // Aesthetic Filter Application
         const aestheticPrompt = getAestheticPrompt(params.style);
-
         let promptSuffix = "Single full frame image.";
-        
-        // STRICT CONSISTENCY INJECTION
         const strictTraits = params.traits && params.traits.length > 0 ? `Visible features: ${params.traits.join(", ")}.` : "";
-        // Inject chest size early in the subject context
-        let subjectContext = `The character is a ${params.gender}, ${params.bodyType} with ${params.chestSize} chest, ${params.style}. Personality: ${params.personality}. ${strictTraits}. Maintain facial features, hair, and body type EXACTLY as reference image.`;
+        let subjectContext = `The character is a ${params.gender}, ${params.bodyType} with ${params.chestSize} chest, ${params.style}. Personality: ${params.personality}. ${strictTraits}. Maintain facial features EXACTLY as reference. ${emotionalContext}`;
         
         if (isSocial) {
-            // New Robust Social Prompting to ensure variety and integration
-            promptSuffix = "Authentic social moment. Main character is naturally integrated into the group/crowd (not just standing in front). Varied composition: over-the-shoulder, side profile, laughing, listening, or talking. Candid, not overly posed.";
+            promptSuffix = "Authentic social moment. Main character is naturally integrated into the group. Varied composition. Candid.";
             subjectContext += " The main character is socializing.";
-            
-            // Add Contextual nuances
-            if (lowerDesc.includes('party') || lowerDesc.includes('club') || lowerDesc.includes('dancing')) {
-                promptSuffix += " Dynamic motion, lively atmosphere, fun expressions.";
-            } else if (lowerDesc.includes('dinner') || lowerDesc.includes('cafe') || lowerDesc.includes('eating')) {
-                promptSuffix += " Intimate setting, seated at table, conversation, shared meal, ambient lighting.";
-            } else if (lowerDesc.includes('walking') || lowerDesc.includes('shopping')) {
-                promptSuffix += " Walking with friends, action shot, interaction.";
-            }
+            if (lowerDesc.includes('party')) promptSuffix += " Dynamic motion, lively atmosphere.";
         }
 
         if (isNatural) {
-            promptSuffix += " Authentic, candid, natural skin texture (visible pores/imperfections), less posed, minimal makeup, relaxed posture. " + SKIN_TEXTURE_PROMPT;
+            promptSuffix += " Authentic, candid, natural skin texture, less posed. " + SKIN_TEXTURE_PROMPT;
         } else {
-             // For standard shots, still ensure texture
              promptSuffix += " " + SKIN_TEXTURE_PROMPT;
         }
 
@@ -528,7 +536,6 @@ export async function generateMediaForPlanItem(
             ${NEGATIVE_PROMPT}
             NO USER INTERFACE.`;
 
-            // Use SAFE generator with fallback
             const sceneImageData = await generateImageSafe(
                 scenePrompt,
                 cleanReferenceBase64,
@@ -563,13 +570,22 @@ export async function generateMediaForPlanItem(
                 const apiKey = getApiKey('gemini');
                 const finalUrl = `${downloadLink}${downloadLink.includes('?') ? '&' : '?'}key=${apiKey}`;
                 const videoResponse = await fetch(finalUrl);
+                if (!videoResponse.ok) throw new Error(`Video fetch failed: ${videoResponse.statusText}`);
                 const videoBlob = await videoResponse.blob();
 
-                return { url: URL.createObjectURL(videoBlob), type: 'video', resourceHandle: videoResource };
+                // If Reel has a script, generate audio
+                let audioUrl = undefined;
+                if (item.script) {
+                     try {
+                         const voiceName = selectVoiceProfile(params);
+                         audioUrl = await generateSpeech(item.script, voiceName, onLog);
+                     } catch(e) { console.warn("Reel audio failed", e); }
+                }
+
+                return { url: URL.createObjectURL(videoBlob), type: 'video', resourceHandle: videoResource, slideshowAudio: audioUrl };
 
             } catch (error: any) {
                 console.warn("Video generation failed, falling back to Slideshow:", error);
-                if (error.message?.includes("limit: 0")) throw error; 
                 return await generateSlideshowFallback(item, referenceAvatarBase64, params, onLog);
             }
         } 
@@ -594,7 +610,7 @@ export async function generateMediaForPlanItem(
 
             return { url: imgData, type: 'image' };
         }
-    }, 3, 3000, onLog);
+    }, 3, 5000, onLog);
 }
 
 // Ensure generateSelfieVideo also uses strict traits
@@ -632,32 +648,36 @@ export async function generateSelfieVideo(
         if (onLog) onLog("Step 2/2: Animating selfie video with Veo...");
         const videoPrompt = `Video selfie, talking to camera, arm held out, vlogging. Vertical 9:16 portrait. ${aestheticPrompt} ${script.substring(0, 100)}...`;
 
-        let operation = await ai.models.generateVideos({
-            model: 'veo-3.1-fast-generate-preview',
-            prompt: videoPrompt,
-            image: { imageBytes: cleanSelfieData, mimeType: 'image/jpeg' },
-            config: { numberOfVideos: 1, resolution: '720p', aspectRatio: '9:16' },
-        });
+        try {
+            let operation = await ai.models.generateVideos({
+                model: 'veo-3.1-fast-generate-preview',
+                prompt: videoPrompt,
+                image: { imageBytes: cleanSelfieData, mimeType: 'image/jpeg' },
+                config: { numberOfVideos: 1, resolution: '720p', aspectRatio: '9:16' },
+            });
 
-        while (!operation.done) {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            operation = await ai.operations.getVideosOperation({ operation: operation });
+            while (!operation.done) {
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                operation = await ai.operations.getVideosOperation({ operation: operation });
+            }
+            const videoResource = operation.response?.generatedVideos?.[0]?.video;
+            const downloadLink = videoResource?.uri;
+            if (!downloadLink) throw new Error("Video generation failed");
+
+            const apiKey = getApiKey('gemini');
+            const finalUrl = `${downloadLink}${downloadLink.includes('?') ? '&' : '?'}key=${apiKey}`;
+            const videoResponse = await fetch(finalUrl);
+            if (!videoResponse.ok) throw new Error(`Video fetch failed: ${videoResponse.statusText}`);
+            const videoBlob = await videoResponse.blob();
+
+            return { videoUrl: URL.createObjectURL(videoBlob), audioUrl, resourceHandle: videoResource };
+        } catch (e) {
+             if (onLog) onLog("Selfie video failed (quota?), falling back to slideshow...", 'warning');
+             return { videoUrl: selfieImageData, audioUrl, resourceHandle: null };
         }
-        const videoResource = operation.response?.generatedVideos?.[0]?.video;
-        const downloadLink = videoResource?.uri;
-        if (!downloadLink) throw new Error("Video generation failed");
-
-        const apiKey = getApiKey('gemini');
-        const finalUrl = `${downloadLink}${downloadLink.includes('?') ? '&' : '?'}key=${apiKey}`;
-        const videoResponse = await fetch(finalUrl);
-        const videoBlob = await videoResponse.blob();
-
-        return { videoUrl: URL.createObjectURL(videoBlob), audioUrl, resourceHandle: videoResource };
-    }, 3, 3000, onLog);
+    }, 3, 5000, onLog);
 }
 
-// ... extendVideo, generateSingleContentItem, animatePhoto, generateSpeech remain largely the same
-// Re-exporting them to ensure file validity
 export async function extendVideo(videoHandle: any, prompt: string, onLog?: LogCallback): Promise<VideoAsset> {
     return retry(async () => {
         if (onLog) onLog("Extending video clip (+5s)...");
@@ -678,9 +698,10 @@ export async function extendVideo(videoHandle: any, prompt: string, onLog?: LogC
         const apiKey = getApiKey('gemini');
         const finalUrl = `${downloadLink}${downloadLink.includes('?') ? '&' : '?'}key=${apiKey}`;
         const videoResponse = await fetch(finalUrl);
+        if (!videoResponse.ok) throw new Error(`Video fetch failed: ${videoResponse.statusText}`);
         const videoBlob = await videoResponse.blob();
         return { url: URL.createObjectURL(videoBlob), resourceHandle: videoResource, mimeType: 'video/mp4' };
-    }, 3, 3000, onLog);
+    }, 3, 4000, onLog);
 }
 
 export async function generateSingleContentItem(params: BloggerParams, type: 'Post' | 'Reel' | 'Story', onLog?: LogCallback): Promise<ContentPlanItem> {
@@ -688,18 +709,34 @@ export async function generateSingleContentItem(params: BloggerParams, type: 'Po
         if (onLog) onLog(`Generating single ${type} idea...`);
         const ai = await getAiClient();
         const lang = params.outputLanguage || "English";
-        const prompt = `Generate ONE single social media content idea for a ${params.style} influencer.
+        
+        const systemInstruction = getGrowthStrategySystemInstruction(lang);
+        const prompt = `Generate ONE viral content idea for a ${params.style} influencer.
         Type: ${type}.
-        Output in ${lang}.
-        JSON format: { "title": string, "description": string, "caption": string, "hashtags": string[] }`;
+        Focus: Engagement (Saves/Shares).
+        JSON output.`;
+        
         const response = await ai.models.generateContent({
             model: "gemini-2.5-flash",
             contents: prompt,
-            config: { responseMimeType: "application/json" }
+            config: { 
+                systemInstruction,
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.OBJECT,
+                    properties: {
+                         title: { type: Type.STRING, description: "VISUAL HOOK (Text on video). Max 7 words." },
+                         description: { type: Type.STRING, description: "Visual scene description." },
+                         caption: { type: Type.STRING, description: "Full caption text." },
+                         script: { type: Type.STRING, description: "Voiceover script (optional)." },
+                         hashtags: { type: Type.ARRAY, items: { type: Type.STRING } }
+                    }
+                }
+            }
         });
         const data = JSON.parse(response.text);
         return { id: crypto.randomUUID(), day: Math.floor(Math.random() * 7) + 1, type: type, ...data };
-    }, 3, 3000, onLog);
+    }, 3, 4000, onLog);
 }
 
 export async function animatePhoto(photoUrl: string, onLog?: LogCallback): Promise<VideoAsset> {
@@ -732,9 +769,10 @@ export async function animatePhoto(photoUrl: string, onLog?: LogCallback): Promi
         const apiKey = getApiKey('gemini');
         const finalUrl = `${downloadLink}${downloadLink.includes('?') ? '&' : '?'}key=${apiKey}`;
         const videoResponse = await fetch(finalUrl);
+        if (!videoResponse.ok) throw new Error(`Video fetch failed: ${videoResponse.statusText}`);
         const videoBlob = await videoResponse.blob();
         return { url: URL.createObjectURL(videoBlob), resourceHandle: videoResource, mimeType: 'video/mp4' };
-    }, 3, 3000, onLog);
+    }, 3, 5000, onLog);
 }
 
 export async function generateSpeech(text: string, voiceName: string = 'Kore', onLog?: LogCallback): Promise<string> {
@@ -755,5 +793,5 @@ export async function generateSpeech(text: string, voiceName: string = 'Kore', o
         const pcmData = base64ToUint8Array(base64Audio);
         const wavBlob = pcmToWav(pcmData, 24000); 
         return URL.createObjectURL(wavBlob);
-    }, 3, 3000, onLog);
+    }, 3, 4000, onLog);
 }

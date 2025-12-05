@@ -2,7 +2,7 @@
 
 /**
  * Fallback API keys - используются как дефолтные значения
- * Приоритет: .env/platform > localStorage > FALLBACK_KEYS
+ * Приоритет: localStorage > .env/platform > FALLBACK_KEYS
  */
 const FALLBACK_KEYS = {
   gemini: '', // Пустая строка форсирует использование env/localStorage
@@ -24,18 +24,12 @@ const getEnvKey = (service: ApiService): string | undefined => {
 /**
  * Получает API ключ с автоматическим fallback
  * Порядок приоритета:
- * 1. Environment variables (API_KEY или VITE_GOOGLE_API_KEY)
- * 2. localStorage (пользовательские настройки)
+ * 1. localStorage (пользовательские настройки) - ВЫСШИЙ ПРИОРИТЕТ
+ * 2. Environment variables (API_KEY или VITE_GOOGLE_API_KEY)
  * 3. Захардкоженные ключи (FALLBACK_KEYS)
  */
 export const getApiKey = (service: ApiService): string => {
-  // 1. Проверяем .env или ключ окружения (наивысший приоритет)
-  const envKey = getEnvKey(service);
-  if (envKey?.trim()) {
-    return envKey.trim();
-  }
-    
-  // 2. Проверяем localStorage (пользовательские настройки)
+  // 1. Проверяем localStorage (пользовательские настройки) - Теперь это ПЕРВЫЙ шаг
   try {
     const storageKey = `apiKey_${service}`;
     if (typeof window !== 'undefined') {
@@ -46,6 +40,12 @@ export const getApiKey = (service: ApiService): string => {
     }
   } catch (e) {
     console.warn(`Failed to read ${service} key from localStorage:`, e);
+  }
+
+  // 2. Проверяем .env или ключ окружения
+  const envKey = getEnvKey(service);
+  if (envKey?.trim()) {
+    return envKey.trim();
   }
 
   // 3. Используем fallback ключ
@@ -87,10 +87,10 @@ export const saveApiKey = (service: ApiService, key: string): void => {
  * Информация об источнике ключа для UI
  */
 export const getKeySource = (service: ApiService): 'custom' | 'env' | 'default' => {
+  if (hasCustomKey(service)) return 'custom'; // Custom now has priority
+  
   const envKey = getEnvKey(service);
   if (envKey?.trim()) return 'env';
-
-  if (hasCustomKey(service)) return 'custom';
   
   return 'default';
 };

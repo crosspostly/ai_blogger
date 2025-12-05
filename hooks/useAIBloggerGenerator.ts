@@ -172,8 +172,8 @@ export function useAIBloggerGenerator(onAuthError: () => void) {
                     setStatus(`Producing media for ${params.autoGenerateWeeks} weeks (${totalItems} items)...`);
                     addLog(`Starting batch production for ${totalItems} items...`, 'info');
 
-                    // Use mapConcurrent to limit active requests to 2
-                    await mapConcurrent(itemsToProcess, 2, async (item, i) => {
+                    // Use mapConcurrent to limit active requests to 1 to avoid Rate Limit 0 on Free Tier
+                    await mapConcurrent(itemsToProcess, 1, async (item, i) => {
                         // Mark as generating
                          setResults(prev => {
                             if (!prev || !prev.contentPlan) return prev;

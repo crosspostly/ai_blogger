@@ -22,7 +22,7 @@ const Select: React.FC<React.SelectHTMLAttributes<HTMLSelectElement>> = (props) 
 const COMMON_TRAITS = [
     "Freckles", "Blue Eyes", "Green Eyes", "Tattoos", "Piercings", 
     "Glasses", "Messy Hair", "Dyed Hair", "Tan Lines", "Dimples", 
-    "Gap Teeth", "Natural Makeup", "Mole/Beauty Spot"
+    "Gap Teeth", "Natural Makeup", "Mole/Beauty Spot", "Sun-kissed Skin"
 ];
 
 const OUTPUT_LANGUAGES = [
@@ -47,28 +47,54 @@ const BODY_TYPES = [
     "Bodybuilder"
 ];
 
+// PRESETS DEFINITION
+const PRESETS: Record<string, Partial<BloggerParams>> = {
+    traveler: {
+        style: 'travel lifestyle',
+        audience: 'luxury travelers',
+        customTheme: 'Luxury resorts, crystal clear water, golden hour, exotic locations',
+        bodyType: 'Athletic / Toned',
+        personality: 'Adventurous, free-spirited, charismatic, elegant',
+        marketingStrategy: 'Visual Aesthetic',
+        traits: ["Sun-kissed Skin", "Natural Makeup", "Tan Lines"]
+    },
+    fashion: {
+        style: 'old money',
+        audience: 'gen z',
+        customTheme: 'Paris fashion week, street style, vintage luxury',
+        bodyType: 'Slim / Skinny',
+        personality: 'Chic, mysterious, sophisticated',
+        marketingStrategy: 'Visual Aesthetic',
+        traits: ["Blue Eyes", "Mole/Beauty Spot"]
+    },
+    fitness: {
+        style: 'sporty fitness',
+        audience: 'fitness enthusiasts',
+        customTheme: 'Gym motivation, morning runs, healthy eating',
+        bodyType: 'Athletic / Toned',
+        personality: 'Energetic, motivational, disciplined',
+        marketingStrategy: 'Educational / Value',
+        traits: ["Messy Hair", "No Makeup"]
+    }
+};
+
 export const GeneratorForm: React.FC<GeneratorFormProps> = ({ onGenerate, currentLanguage }) => {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [openSection, setOpenSection] = useState<'identity' | 'style' | 'campaign'>('identity');
+    const [activePreset, setActivePreset] = useState<string>('traveler');
     
-    // Updated defaults
+    // Default is the TRAVELER preset
     const defaultParams: BloggerParams = {
         gender: 'female',
         ethnicity: 'caucasian',
-        age: 24,
-        style: 'travel lifestyle',
-        audience: 'travel enthusiasts',
-        customTheme: 'Bright, energetic, dynamic, hidden gems, luxury travel, vibrant colors',
+        age: 23,
         referenceImage: undefined,
         planWeeks: 4,
         autoGenerateWeeks: 4,
         outputLanguage: 'English',
-        
-        // New Defaults
-        bodyType: 'Curvy / Hourglass',
-        chestSize: 'Voluptuous (DD+ Cup)',
-        personality: 'Charismatic, confident, adventurous, flirty',
-        traits: []
+        chestSize: 'Medium (C Cup)',
+        // Merge with Traveler default
+        ...PRESETS.traveler as any
     };
 
     const [params, setParams] = useState<BloggerParams>(defaultParams);
@@ -78,7 +104,20 @@ export const GeneratorForm: React.FC<GeneratorFormProps> = ({ onGenerate, curren
         if (currentLanguage && currentLanguage !== 'English') {
              setParams(p => ({ ...p, outputLanguage: currentLanguage }));
         }
-    }, []);
+    }, [currentLanguage]);
+
+    const applyPreset = (key: string) => {
+        setActivePreset(key);
+        setParams(prev => ({
+            ...prev,
+            ...PRESETS[key],
+            // Preserve identity fields if reference is loaded
+            referenceImage: prev.referenceImage,
+            gender: prev.gender,
+            ethnicity: prev.ethnicity,
+            age: prev.age,
+        }));
+    };
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
@@ -149,6 +188,35 @@ export const GeneratorForm: React.FC<GeneratorFormProps> = ({ onGenerate, curren
 
     return (
         <div className="bg-gray-800/50 border border-gray-700 rounded-2xl p-6 lg:p-8 backdrop-blur-sm">
+            
+            {/* TEMPLATE SELECTOR */}
+            <div className="mb-8">
+                <h3 className="text-gray-400 text-xs font-bold uppercase tracking-wider mb-3">Select Campaign Template</h3>
+                <div className="grid grid-cols-3 gap-3">
+                    <button 
+                        onClick={() => applyPreset('traveler')}
+                        className={`p-3 rounded-xl border flex flex-col items-center gap-2 transition ${activePreset === 'traveler' ? 'bg-purple-600/20 border-purple-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'}`}
+                    >
+                        <span className="text-2xl">✈️</span>
+                        <span className="text-xs font-bold">Luxury Traveler</span>
+                    </button>
+                    <button 
+                         onClick={() => applyPreset('fashion')}
+                        className={`p-3 rounded-xl border flex flex-col items-center gap-2 transition ${activePreset === 'fashion' ? 'bg-pink-600/20 border-pink-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'}`}
+                    >
+                        <span className="text-2xl">👗</span>
+                        <span className="text-xs font-bold">Fashion Icon</span>
+                    </button>
+                    <button 
+                         onClick={() => applyPreset('fitness')}
+                        className={`p-3 rounded-xl border flex flex-col items-center gap-2 transition ${activePreset === 'fitness' ? 'bg-blue-600/20 border-blue-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'}`}
+                    >
+                        <span className="text-2xl">💪</span>
+                        <span className="text-xs font-bold">Fitness Pro</span>
+                    </button>
+                </div>
+            </div>
+
             <h2 className="text-2xl font-bold text-white mb-6">Create Your AI Blogger</h2>
             
             {/* Persona Loader */}
@@ -159,8 +227,8 @@ export const GeneratorForm: React.FC<GeneratorFormProps> = ({ onGenerate, curren
                         className="cursor-pointer"
                     >
                         <UploadIcon className="w-12 h-12 mx-auto text-gray-400 group-hover:text-purple-400 mb-3 transition" />
-                        <h3 className="text-lg font-semibold text-white">Load Existing Persona</h3>
-                        <p className="text-sm text-gray-400 mt-1">Upload a photo or a saved .json persona file to skip model generation.</p>
+                        <h3 className="text-lg font-semibold text-white">Load Face / Persona</h3>
+                        <p className="text-sm text-gray-400 mt-1">Upload a photo to use your own model.</p>
                         <input 
                             ref={fileInputRef}
                             type="file" 
@@ -179,8 +247,8 @@ export const GeneratorForm: React.FC<GeneratorFormProps> = ({ onGenerate, curren
                         >
                             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
-                        <p className="mt-3 text-green-400 font-semibold text-sm">Persona Loaded!</p>
-                        <p className="text-xs text-gray-400">Gender/Age settings hidden.</p>
+                        <p className="mt-3 text-green-400 font-semibold text-sm">Face Loaded!</p>
+                        <p className="text-xs text-gray-400">Template style will apply to this face.</p>
                     </div>
                 )}
             </div>
@@ -285,33 +353,47 @@ export const GeneratorForm: React.FC<GeneratorFormProps> = ({ onGenerate, curren
                     >
                          <div className="flex items-center gap-3">
                             <div className="w-8 h-8 rounded-full bg-pink-600 flex items-center justify-center text-white font-bold">2</div>
-                            <span className="text-lg font-semibold text-white">Style & Vibe</span>
+                            <span className="text-lg font-semibold text-white">Style & Viral Strategy</span>
                         </div>
                         <svg className={`w-5 h-5 text-gray-400 transform transition-transform ${openSection === 'style' ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
                     </button>
                     
                     {openSection === 'style' && (
                         <div className="p-6 bg-gray-900/30 space-y-6 animate-fade-in">
+                            <div className="p-4 bg-gradient-to-r from-purple-900/30 to-pink-900/30 rounded-lg border border-pink-500/20 mb-4">
+                                <FormInput label="🔥 Growth Strategy (How do you want to go viral?)">
+                                    <Select value={params.marketingStrategy} onChange={(e) => setParams({ ...params, marketingStrategy: e.target.value as any })}>
+                                        <option value="Visual Aesthetic">Visual Aesthetic / Mood (Best for Travel/Lifestyle)</option>
+                                        <option value="POV / Relatable">POV / Relatable (Best for Reels/TikTok)</option>
+                                        <option value="Educational / Value">Educational / Value (Best for Saves)</option>
+                                    </Select>
+                                </FormInput>
+                                <p className="text-xs text-gray-400 mt-2">
+                                    {params.marketingStrategy === 'POV / Relatable' && "Focuses on 'Hooks' and relatable situations. Best for rapid growth."}
+                                    {params.marketingStrategy === 'Visual Aesthetic' && "Focuses on high-quality, curated vibes. Perfect for 'Old Money' or Travel."}
+                                    {params.marketingStrategy === 'Educational / Value' && "Focuses on tips, tricks, and informative captions."}
+                                </p>
+                            </div>
+
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <FormInput label="Fashion Style">
+                                <FormInput label="Aesthetic / Fashion Style">
                                     <Select value={params.style} onChange={(e) => setParams({ ...params, style: e.target.value })}>
-                                        <option value="travel lifestyle">Travel Lifestyle (Recommended)</option>
+                                        <option value="travel lifestyle">Travel Lifestyle (Bright & Dynamic)</option>
+                                        <option value="old money">Old Money / Quiet Luxury (Film Look)</option>
+                                        <option value="clean girl">Clean Girl / Minimalist</option>
+                                        <option value="y2k">Y2K / 2000s Pop</option>
+                                        <option value="dark academia">Dark Academia</option>
                                         <option value="glamour fashion">Glamour Fashion</option>
                                         <option value="sporty fitness">Sporty Fitness</option>
-                                        <option value="professional">Professional</option>
-                                        <option value="casual lifestyle">Casual Lifestyle</option>
-                                        <option value="artistic indie">Artistic Indie</option>
-                                        <option value="cyberpunk">Cyberpunk / Sci-Fi</option>
                                         <option value="cottagecore">Cottagecore</option>
                                     </Select>
                                 </FormInput>
                                 <FormInput label="Target Audience">
                                     <Select value={params.audience} onChange={(e) => setParams({ ...params, audience: e.target.value })}>
-                                        <option value="travel enthusiasts">Travel Enthusiasts</option>
-                                        <option value="fitness followers">Fitness & Health</option>
-                                        <option value="tech enthusiasts">Tech Enthusiasts</option>
-                                        <option value="beauty and fashion lovers">Beauty & Fashion</option>
-                                        <option value="lifestyle and wellness seekers">Lifestyle & Wellness</option>
+                                        <option value="luxury travelers">Luxury Travelers</option>
+                                        <option value="gen z">Gen Z (Trendsetters)</option>
+                                        <option value="millennials">Millennials (Lifestyle)</option>
+                                        <option value="fitness enthusiasts">Fitness Enthusiasts</option>
                                         <option value="business professionals">Business Professionals</option>
                                     </Select>
                                 </FormInput>
@@ -411,12 +493,12 @@ export const GeneratorForm: React.FC<GeneratorFormProps> = ({ onGenerate, curren
                     {params.referenceImage ? (
                         <>
                             <span>📸</span>
-                            Use Loaded Persona & Start
+                            Use Loaded Face & Start
                         </>
                     ) : (
                         <>
                             <span>✨</span>
-                            Generate Model (Approval Step)
+                            Generate New Identity
                         </>
                     )}
                 </button>

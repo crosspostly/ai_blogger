@@ -444,11 +444,15 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                                                 <div className="flex items-center justify-between gap-3">
                                                     <div className="flex items-center gap-3 w-full">
                                                         <span className="bg-gray-800 text-gray-300 px-2 py-1 rounded text-xs font-mono">Day {item.day}</span>
-                                                        <input 
-                                                            className="bg-transparent font-bold text-white text-lg w-full border-b border-transparent hover:border-gray-600 focus:border-purple-500 outline-none"
-                                                            defaultValue={item.title}
-                                                            onBlur={(e) => onUpdateItem && onUpdateItem(wIdx, idx, 'title', e.target.value)}
-                                                        />
+                                                        <div className="flex-1">
+                                                            <p className="text-[10px] text-gray-500 uppercase font-bold tracking-wider mb-1">Visual Hook (Text on Video) / Headline</p>
+                                                            <input 
+                                                                className="bg-transparent font-bold text-white text-lg w-full border-b border-transparent hover:border-gray-600 focus:border-purple-500 outline-none placeholder-gray-600"
+                                                                defaultValue={item.title}
+                                                                placeholder="Enter hook..."
+                                                                onBlur={(e) => onUpdateItem && onUpdateItem(wIdx, idx, 'title', e.target.value)}
+                                                            />
+                                                        </div>
                                                     </div>
                                                     {item.mediaUrl && (
                                                         <button 
@@ -462,9 +466,10 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                                                     )}
                                                 </div>
                                                 <div className="bg-black/30 p-4 rounded-lg border border-white/5">
+                                                    <p className="text-[10px] text-gray-500 uppercase font-bold tracking-wider mb-1">Caption / Value</p>
                                                     <textarea 
                                                         className="bg-transparent text-gray-300 text-sm leading-relaxed whitespace-pre-wrap w-full resize-none outline-none border-b border-transparent focus:border-purple-500"
-                                                        rows={3}
+                                                        rows={4}
                                                         defaultValue={item.caption}
                                                         onBlur={(e) => onUpdateItem && onUpdateItem(wIdx, idx, 'caption', e.target.value)}
                                                     />
@@ -472,7 +477,7 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                                                 <div>
                                                     <div className="flex items-center justify-between mb-1">
                                                         <div className="flex items-center gap-2">
-                                                            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Scene Description</span>
+                                                            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Visual Description (AI Prompt)</span>
                                                         </div>
                                                         <button 
                                                             onClick={() => setOpenScriptId(openScriptId === item.id ? null : item.id)}
